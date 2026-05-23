@@ -1,4 +1,4 @@
-module identity_provider
+module github.com/gddisney/identity_provider
 
 go 1.25.10
 
