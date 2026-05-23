@@ -18,7 +18,6 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 	// 1. The Main Identity Portal (App Catalog Dashboard)
 	// Protected by secure_bootstrap.RequireAuth to ensure a valid session exists.
 	r.Mux.HandleFunc("/", secure_bootstrap.RequireAuth(r, func(c *guikit.Context) {
-		// In a full implementation, this queries AppRegistryPageID to show authorized apps
 		c.Data["Title"] = "Identity Portal"
 		r.GUIKit.Render(c, "views/portal")
 	}))
