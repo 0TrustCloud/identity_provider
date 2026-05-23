@@ -16,11 +16,14 @@ import (
 func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine) {
 
 	// 1. The Main Identity Portal (App Catalog Dashboard)
-	// Protected by secure_bootstrap.RequireAuth to ensure a valid session exists.
-	r.Mux.HandleFunc("/", secure_bootstrap.RequireAuth(r, func(c *guikit.Context) {
-		c.Data["Title"] = "Identity Portal"
-		r.GUIKit.Render(c, "views/portal")
-	}))
+	// FIX: Bind this to GUIKit since RequireAuth returns a guikit context handler, not a standard HTTP handler.
+	if r.GUIKit != nil {
+		r.GUIKit.Get("/", secure_bootstrap.RequireAuth(r, func(c *guikit.Context) {
+			// In a full implementation, this queries AppRegistryPageID to show authorized apps
+			c.Data["Title"] = "Identity Portal"
+			r.GUIKit.Render(c, "views/portal")
+		}))
+	}
 
 	// 2. Audit Ingestion (HTTP)
 	// Protected by the PolicyEngine. Only identities with 'write' access to 'audit_logs' can post here.
@@ -78,7 +81,14 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 		audit.logsMu.RUnlock()
 
 		c.Data["Results"] = recent
-		r.GUIKit.Render(c, "views/admin_logs")
+		
+		// Ensure GUIKit exists before attempting to render
+		if r.GUIKit != nil {
+			r.GUIKit.Render(c, "views/admin_logs")
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte("GUI Engine offline"))
+		}
 	}))
 
 	// 5. Application Registration (Admin API)
