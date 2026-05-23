@@ -114,3 +114,23 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 		w.Write([]byte("Application registered successfully"))
 	}))
 }
+// 6. Session Logout
+	r.Mux.HandleFunc("/logout", func(w http.ResponseWriter, req *http.Request) {
+		// Destroy the session cookie expected by middleware.go
+		http.SetCookie(w, &http.Cookie{
+			Name:     "session_id",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   true, // Ensure this matches your TLS setup
+		})
+
+		// Prevent the browser from caching the authenticated state
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+
+		// Redirect to the login page or public root
+		http.Redirect(w, req, "/", http.StatusSeeOther)
+	})
