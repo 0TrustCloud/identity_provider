@@ -113,8 +113,8 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte("Application registered successfully"))
 	}))
-}
-// 6. Session Logout
+
+	// 6. Session Logout
 	r.Mux.HandleFunc("/logout", func(w http.ResponseWriter, req *http.Request) {
 		// Destroy the session cookie expected by middleware.go
 		http.SetCookie(w, &http.Cookie{
@@ -134,3 +134,4 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 		// Redirect to the login page or public root
 		http.Redirect(w, req, "/", http.StatusSeeOther)
 	})
+}
