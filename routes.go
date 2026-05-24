@@ -11,11 +11,12 @@ import (
 	"github.com/gddisney/secure_policy"
 )
 
-// RegisterRoutes binds admin and audit endpoints to the mesh router.
-// Note: The main UI portal route has been moved to the boilerplate to prevent import cycles.
+// RegisterRoutes binds all identity, admin, and audit endpoints to the mesh router.
+// The main UI portal route is handled in the boilerplate to prevent import cycles.
 func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine) {
 
 	// 1. Audit Ingestion (HTTP)
+	// Protected by the PolicyEngine. Only identities with 'write' access to 'audit_logs' can post here.
 	r.Mux.HandleFunc("/ingest", EnforcePolicy(pe, "write", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -39,9 +40,12 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 	}))
 
 	// 2. Audit Ingestion (RPC over the Mesh Tunnel)
+	// Registers the function on the LocalBus and enforces policy against the hardware CallerID.
 	if rpcEngineModule, ok := r.Modules["mesh_rpc"]; ok {
 		rpcEngine := rpcEngineModule.(*secure_network.RPCManager)
 		rpcEngine.Register("ingest_log", func(ctx secure_network.RPCContext, args []byte) (interface{}, error) {
+			
+			// Verify the hardware identity (CallerID) has write access to audit logs
 			if !pe.Evaluate(ctx.CallerID, "write", "audit_logs", nil) {
 				return nil, fmt.Errorf("unauthorized to ingest logs over RPC")
 			}
@@ -57,6 +61,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 	}
 
 	// 3. System Audit Console (UI)
+	// Protected by the PolicyEngine. Only users explicitly granted 'read' to 'audit_logs' can view this.
 	r.Mux.HandleFunc("/admin/logs", EnforcePolicy(pe, "read", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
 		c := &guikit.Context{W: w, R: req, Data: make(map[string]interface{})}
 		
@@ -67,6 +72,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 
 		c.Data["Results"] = recent
 		
+		// Ensure GUIKit exists before attempting to render
 		if r.GUIKit != nil {
 			r.GUIKit.Render(c, "views/admin_logs")
 		} else {
@@ -76,6 +82,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 	}))
 
 	// 4. Application Registration (Admin API)
+	// Protected by the PolicyEngine. Only administrators can add new integrations to the catalog.
 	r.Mux.HandleFunc("/admin/apps/register", EnforcePolicy(pe, "write", "app_registry")(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -99,19 +106,22 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 
 	// 5. Session Logout
 	r.Mux.HandleFunc("/logout", func(w http.ResponseWriter, req *http.Request) {
+		// Destroy the session cookie expected by middleware.go
 		http.SetCookie(w, &http.Cookie{
 			Name:     "session_id",
 			Value:    "",
 			Path:     "/",
 			MaxAge:   -1,
 			HttpOnly: true,
-			Secure:   true,
+			Secure:   true, // Ensure this matches your TLS setup
 		})
 
+		// Prevent the browser from caching the authenticated state
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
 		w.Header().Set("Expires", "0")
 
+		// Redirect to the login page or public root
 		http.Redirect(w, req, "/", http.StatusSeeOther)
 	})
 }
