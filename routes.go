@@ -13,11 +13,11 @@ import (
 
 // RegisterRoutes binds all identity, admin, and audit endpoints to the mesh router.
 // The main UI portal route is handled in the boilerplate to prevent import cycles.
-func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine) {
+func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager) {
 
 	// 1. Audit Ingestion (HTTP)
 	// Protected by the PolicyEngine. Only identities with 'write' access to 'audit_logs' can post here.
-	r.Mux.HandleFunc("/ingest", EnforcePolicy(pe, "write", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
+	r.Mux.HandleFunc("/ingest", EnforcePolicy(pe, sm, "write", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -62,7 +62,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 
 	// 3. System Audit Console (UI)
 	// Protected by the PolicyEngine. Only users explicitly granted 'read' to 'audit_logs' can view this.
-	r.Mux.HandleFunc("/admin/logs", EnforcePolicy(pe, "read", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
+	r.Mux.HandleFunc("/admin/logs", EnforcePolicy(pe, sm, "read", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
 		c := &guikit.Context{W: w, R: req, Data: make(map[string]interface{})}
 		
 		audit.logsMu.RLock()
@@ -83,7 +83,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 
 	// 4. Application Registration (Admin API)
 	// Protected by the PolicyEngine. Only administrators can add new integrations to the catalog.
-	r.Mux.HandleFunc("/admin/apps/register", EnforcePolicy(pe, "write", "app_registry")(func(w http.ResponseWriter, req *http.Request) {
+	r.Mux.HandleFunc("/admin/apps/register", EnforcePolicy(pe, sm, "write", "app_registry")(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -104,8 +104,14 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 		w.Write([]byte("Application registered successfully"))
 	}))
 
-	// 5. Session Logout
+	// 5. Secure Session Logout
 	r.Mux.HandleFunc("/logout", func(w http.ResponseWriter, req *http.Request) {
+		cookie, err := req.Cookie("session_id")
+		if err == nil && cookie.Value != "" {
+			// Actively blacklist the JWT in the database to prevent replay attacks
+			sm.RevokeTokenString(cookie.Value)
+		}
+
 		// Destroy the session cookie expected by middleware.go
 		http.SetCookie(w, &http.Cookie{
 			Name:     "session_id",
@@ -114,6 +120,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 			MaxAge:   -1,
 			HttpOnly: true,
 			Secure:   true, // Ensure this matches your TLS setup
+			SameSite: http.SameSiteStrictMode,
 		})
 
 		// Prevent the browser from caching the authenticated state
