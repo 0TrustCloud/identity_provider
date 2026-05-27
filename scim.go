@@ -10,7 +10,7 @@ import (
 	"github.com/gddisney/secure_network"
 	"github.com/gddisney/ultimate_db"
 )
-
+type RPCLogger = LogDispatcher
 // SCIMUser represents the standard SCIM 2.0 user schema
 type SCIMUser struct {
 	Schemas  []string `json:"schemas"`
