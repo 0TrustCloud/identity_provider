@@ -11,6 +11,7 @@ import (
 	"github.com/gddisney/ultimate_db"
 )
 
+// SCIMUser represents the standard SCIM 2.0 user schema
 type SCIMUser struct {
 	Schemas  []string `json:"schemas"`
 	UserName string   `json:"userName"`
@@ -21,14 +22,16 @@ type SCIMUser struct {
 	Active bool `json:"active"`
 }
 
+// SCIMDaemon handles asynchronous lifecycle management and external provisioning
 type SCIMDaemon struct {
 	DB       *ultimate_db.DB
 	LocalBus chan secure_network.SystemEvent
 	Client   *http.Client
-	Logger   *logger.RPCLogger
+	Logger   *logger.LogDispatcher // Upgraded to the new LogDispatcher
 }
 
-func NewSCIMDaemon(db *ultimate_db.DB, bus chan secure_network.SystemEvent, sysLog *logger.RPCLogger) *SCIMDaemon {
+// NewSCIMDaemon initializes the SCIM background worker
+func NewSCIMDaemon(db *ultimate_db.DB, bus chan secure_network.SystemEvent, sysLog *logger.LogDispatcher) *SCIMDaemon {
 	return &SCIMDaemon{
 		DB:       db,
 		LocalBus: bus,
@@ -37,8 +40,11 @@ func NewSCIMDaemon(db *ultimate_db.DB, bus chan secure_network.SystemEvent, sysL
 	}
 }
 
+// Start begins listening to the LocalBus for SCIM provisioning events
 func (s *SCIMDaemon) Start() {
-	if s.Logger != nil { s.Logger.Info("SCIM background daemon initialized and listening.") }
+	if s.Logger != nil { 
+		s.Logger.Info("SCIM background daemon initialized and listening.") 
+	}
 	for event := range s.LocalBus {
 		if event.Topic == "scim_provision" {
 			go s.handleProvision(event.Payload)
@@ -46,6 +52,7 @@ func (s *SCIMDaemon) Start() {
 	}
 }
 
+// handleProvision executes the outbound HTTP request to the target application's SCIM endpoint
 func (s *SCIMDaemon) handleProvision(payload []byte) {
 	var data struct {
 		AppID    string   `json:"app_id"`
@@ -68,7 +75,7 @@ func (s *SCIMDaemon) handleProvision(payload []byte) {
 	json.Unmarshal(appData, &app)
 
 	if app.SCIMEndpoint == "" {
-		return // SSO only, no SCIM configured
+		return // SSO only, no SCIM configured for this application
 	}
 
 	scimUser := SCIMUser{
