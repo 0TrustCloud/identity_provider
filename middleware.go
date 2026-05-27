@@ -7,7 +7,6 @@ import (
 	"github.com/gddisney/logger"
 	"github.com/gddisney/secure_policy"
 )
-type RPCLogger = LogDispatcher
 type contextKey string
 const SubjectContextKey contextKey = "subject_id"
 
