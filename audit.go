@@ -10,7 +10,7 @@ import (
 	"github.com/gddisney/logger"
 	"github.com/gddisney/orchid_sync"
 )
-
+type RPCLogger = LogDispatcher
 // LogDisplay is used specifically to format logs for the GML frontend UI.
 type LogDisplay struct {
 	LevelClass string
