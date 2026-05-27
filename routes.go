@@ -5,128 +5,178 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/gddisney/guikit"
 	"github.com/gddisney/logger"
 	"github.com/gddisney/secure_network"
 	"github.com/gddisney/secure_policy"
+	"gopkg.in/yaml.v3"
 )
 
-// Global safeguard to ensure routes are only ever mounted once onto the ServeMux.
+// RouteConfig maps YAML entries to router endpoints
+type RouteConfig struct {
+	Pattern  string `yaml:"pattern"`
+	Method   string `yaml:"method"`
+	Action   string `yaml:"action"`
+	Resource string `yaml:"resource"`
+	Handler  string `yaml:"handler"`
+}
+
+type Config struct {
+	Routes []RouteConfig `yaml:"routes"`
+}
+
+// IngestPayload defines the expected JSON structure for external logs
+type IngestPayload struct {
+	Actor   string `json:"actor"`
+	Level   string `json:"level"`
+	Service string `json:"service"`
+	Message string `json:"message"`
+}
+
 var mountOnce sync.Once
 
-// RegisterRoutes binds all identity, admin, and audit endpoints to the mesh router.
-// It now requires the logger.RPCLogger to satisfy the updated middleware requirements.
-func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, sysLog *logger.RPCLogger) {
-
+// RegisterRoutes binds identity, admin, and audit endpoints dynamically.
+func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, Logger *logger.LogDispatcher, configPath string) {
 	mountOnce.Do(func() {
+		// 1. Load Dynamic Config
+		cfgData, err := os.ReadFile(configPath)
+		if err != nil {
+			if Logger != nil { Logger.Error("Failed to load routes.yaml: " + err.Error()) }
+			return
+		}
+		var cfg Config
+		if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
+			if Logger != nil { Logger.Error("Failed to parse routes.yaml: " + err.Error()) }
+			return
+		}
 
-		// 1. Audit Ingestion (HTTP)
-		// Signature: EnforcePolicy(pe, sm, sysLog, action, resource)
-		r.Mux.HandleFunc("/ingest", EnforcePolicy(pe, sm, sysLog, "write", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
-			if req.Method != http.MethodPost {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
+		// 2. Define Handler Registry
+		registry := map[string]http.HandlerFunc{
+			
+			// HTTP Log Ingest: Routes external logs through the central Pub/Sub dispatcher
+			"ingest_handler": func(w http.ResponseWriter, req *http.Request) {
+				payload, _ := io.ReadAll(req.Body)
+				var logData IngestPayload
+				if err := json.Unmarshal(payload, &logData); err == nil {
+					if Logger != nil {
+						if logData.Level == "AUDIT" {
+							Logger.Audit(logData.Actor, "EXTERNAL_INGEST", logData.Message)
+						} else if logData.Level == "ERROR" {
+							Logger.Error(fmt.Sprintf("[%s] %s", logData.Service, logData.Message))
+						} else {
+							Logger.Info(fmt.Sprintf("[%s] %s", logData.Service, logData.Message))
+						}
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+			},
+			
+			// Admin Logs UI: Serves the real-time ring buffer from the AuditController
+			"admin_logs_handler": func(w http.ResponseWriter, req *http.Request) {
+				c := &guikit.Context{W: w, R: req, Data: make(map[string]interface{})}
+				audit.logsMu.RLock()
+				recent := make([]LogDisplay, len(audit.recentLogs))
+				copy(recent, audit.recentLogs)
+				audit.logsMu.RUnlock()
+				
+				c.Data["Results"] = recent
+				r.GUIKit.Render(c, "views/admin_logs")
+			},
+			
+			// App Registration: Deploys a new SCIM integration
+			"register_app_handler": func(w http.ResponseWriter, req *http.Request) {
+				actor, _ := req.Context().Value(SubjectContextKey).(string)
+				var newApp Application
+				if err := json.NewDecoder(req.Body).Decode(&newApp); err != nil {
+					http.Error(w, "Invalid payload format", http.StatusBadRequest)
+					return
+				}
+				if err := admin.RegisterApp(newApp, actor); err != nil {
+					http.Error(w, "Failed to register application", http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusCreated)
+			},
+			
+			// Logout: Revokes the hardware-bound session token
+			"logout_handler": func(w http.ResponseWriter, req *http.Request) {
+				cookie, err := req.Cookie("session_id")
+				if err == nil && cookie.Value != "" {
+					sm.RevokeTokenString(cookie.Value)
+					if Logger != nil {
+						Logger.Info("Session revoked for token: " + cookie.Value[:10] + "...")
+					}
+				}
+				http.SetCookie(w, &http.Cookie{
+					Name:     "session_id",
+					Value:    "",
+					Path:     "/",
+					MaxAge:   -1,
+					HttpOnly: true,
+					Secure:   true,
+					SameSite: http.SameSiteStrictMode,
+				})
+				http.Redirect(w, req, "/", http.StatusSeeOther)
+			},
+		}
+
+		// 3. Register HTTP routes dynamically
+		for _, route := range cfg.Routes {
+			handler, ok := registry[route.Handler]
+			if !ok {
+				if Logger != nil { Logger.Error("Handler not found in registry: " + route.Handler) }
+				continue
 			}
 
-			payload, err := io.ReadAll(req.Body)
-			if err != nil {
-				http.Error(w, "Bad request", http.StatusBadRequest)
-				return
+			// Apply EnforcePolicy middleware only if action/resource are defined in YAML
+			var finalHandler http.HandlerFunc
+			if route.Action != "NONE" {
+				finalHandler = EnforcePolicy(pe, sm, Logger, route.Action, route.Resource)(func(w http.ResponseWriter, req *http.Request) {
+					if route.Method != "" && req.Method != route.Method {
+						http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+						return
+					}
+					handler(w, req)
+				})
+			} else {
+				finalHandler = handler
 			}
-			defer req.Body.Close()
+			r.Mux.HandleFunc(route.Pattern, finalHandler)
+		}
 
-			var logData LogPayload
-			if err := json.Unmarshal(payload, &logData); err == nil {
-				audit.RecordLog(logData.Level, logData.Service, logData.Message)
-			}
-
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("Log ingested successfully"))
-		}))
-
-		// 2. Audit Ingestion (RPC over the Mesh Tunnel)
+		// 4. RPC registration for Mesh-native log ingest
 		if rpcEngineModule, ok := r.Modules["mesh_rpc"]; ok {
 			rpcEngine := rpcEngineModule.(*secure_network.RPCManager)
 			rpcEngine.Register("ingest_log", func(ctx secure_network.RPCContext, args []byte) (interface{}, error) {
+				
+				// Enforce Zero-Trust write policy over RPC
 				if !pe.Evaluate(ctx.CallerID, "write", "audit_logs", nil) {
-					return nil, fmt.Errorf("unauthorized to ingest logs over RPC")
+					if Logger != nil {
+						Logger.Audit(fmt.Sprintf("%x", ctx.CallerID[:8]), "RPC_DENIED", "Unauthorized attempt to ingest log over mesh")
+					}
+					return nil, fmt.Errorf("unauthorized")
 				}
-
-				var logData LogPayload
-				if err := json.Unmarshal(args, &logData); err != nil {
-					return nil, err
+				
+				var logData IngestPayload
+				json.Unmarshal(args, &logData)
+				
+				// Route through the central dispatcher
+				if Logger != nil {
+					callerHex := fmt.Sprintf("%x", ctx.CallerID[:8])
+					if logData.Level == "AUDIT" {
+						Logger.Audit(callerHex, "RPC_INGEST", logData.Message)
+					} else if logData.Level == "ERROR" {
+						Logger.Error(fmt.Sprintf("[%s] RPC Error from %s: %s", logData.Service, callerHex, logData.Message))
+					} else {
+						Logger.Info(fmt.Sprintf("[%s] RPC Log from %s: %s", logData.Service, callerHex, logData.Message))
+					}
 				}
-
-				audit.RecordLog(logData.Level, logData.Service, logData.Message)
+				
 				return map[string]string{"status": "success"}, nil
 			})
 		}
-
-		// 3. System Audit Console (UI)
-		r.Mux.HandleFunc("/admin/logs", EnforcePolicy(pe, sm, sysLog, "read", "audit_logs")(func(w http.ResponseWriter, req *http.Request) {
-			c := &guikit.Context{W: w, R: req, Data: make(map[string]interface{})}
-
-			audit.logsMu.RLock()
-			recent := make([]LogDisplay, len(audit.recentLogs))
-			copy(recent, audit.recentLogs)
-			audit.logsMu.RUnlock()
-
-			c.Data["Results"] = recent
-
-			if r.GUIKit != nil {
-				r.GUIKit.Render(c, "views/admin_logs")
-			} else {
-				http.Error(w, "GUI Engine offline", http.StatusInternalServerError)
-			}
-		}))
-
-		// 4. Application Registration (Admin API)
-		r.Mux.HandleFunc("/admin/apps/register", EnforcePolicy(pe, sm, sysLog, "write", "app_registry")(func(w http.ResponseWriter, req *http.Request) {
-			if req.Method != http.MethodPost {
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-
-			// Extract actor from context (injected by EnforcePolicy)
-			actor, _ := req.Context().Value(SubjectContextKey).(string)
-			if actor == "" { actor = "system" }
-
-			var newApp Application
-			if err := json.NewDecoder(req.Body).Decode(&newApp); err != nil {
-				http.Error(w, "Invalid application payload", http.StatusBadRequest)
-				return
-			}
-
-			// Pass both app AND actor
-			if err := admin.RegisterApp(newApp, actor); err != nil {
-				http.Error(w, "Failed to register application", http.StatusInternalServerError)
-				return
-			}
-
-			w.WriteHeader(http.StatusCreated)
-			w.Write([]byte("Application registered successfully"))
-		}))
-
-		// 5. Secure Session Logout
-		r.Mux.HandleFunc("/logout", func(w http.ResponseWriter, req *http.Request) {
-			cookie, err := req.Cookie("session_id")
-			if err == nil && cookie.Value != "" {
-				sm.RevokeTokenString(cookie.Value)
-			}
-
-			http.SetCookie(w, &http.Cookie{
-				Name:     "session_id",
-				Value:    "",
-				Path:     "/",
-				MaxAge:   -1,
-				HttpOnly: true,
-				Secure:   true,
-				SameSite: http.SameSiteStrictMode,
-			})
-
-			http.Redirect(w, req, "/", http.StatusSeeOther)
-		})
 	})
 }
