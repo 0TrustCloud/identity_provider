@@ -10,7 +10,6 @@ import (
 )
 
 const AppRegistryPageID = ultimate_db.PageID(4)
-type RPCLogger = LogDispatcher
 type AdminController struct {
 	DB           *ultimate_db.DB
 	PolicyEngine *secure_policy.PolicyEngine
