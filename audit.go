@@ -1,27 +1,17 @@
 package identity_provider
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"log"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gddisney/guikit"
+	"github.com/gddisney/logger"
 	"github.com/gddisney/orchid_sync"
-	"github.com/gddisney/ultimate_db"
 )
 
-const AuditLogPageID ultimate_db.PageID = 5 // Reserving Page 5 for Audit Logs
-
-type LogPayload struct {
-	Level   string `json:"level"`
-	Service string `json:"service"`
-	Message string `json:"message"`
-}
-
+// LogDisplay is used specifically to format logs for the GML frontend UI.
 type LogDisplay struct {
 	LevelClass string
 	Level      string
@@ -31,56 +21,52 @@ type LogDisplay struct {
 }
 
 type AuditController struct {
-	DB           *ultimate_db.DB
 	SearchEngine *orchid_sync.Engine
 	UI           *guikit.GUIKit
 	recentLogs   []LogDisplay
 	logsMu       sync.RWMutex
 }
 
-func NewAuditController(db *ultimate_db.DB, search *orchid_sync.Engine, ui *guikit.GUIKit) *AuditController {
+// NewAuditController initializes the UI and Search controller for audit logs.
+func NewAuditController(search *orchid_sync.Engine, ui *guikit.GUIKit) *AuditController {
 	return &AuditController{
-		DB:           db,
 		SearchEngine: search,
 		UI:           ui,
-		recentLogs:   make([]LogDisplay, 0, 100),
+		recentLogs:   make([]LogDisplay, 0, 100), // Ring buffer capped at 100
 	}
 }
 
-func generateLogID() string {
-	bytes := make([]byte, 16)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
-}
+// Export satisfies the logger.Exporter interface. 
+// The LogDispatcher calls this automatically AFTER safely persisting the log to ultimate_db.
+func (a *AuditController) Export(item logger.LogItem) error {
+	// 1. Index for Threat Hunting Search
+	indexableText := strings.ToLower(item.Level + " " + item.Service + " " + item.Message)
+	
+	// Using Timestamp as a unique document ID for Orchid Sync
+	logID := fmt.Sprintf("%d", item.Timestamp) 
+	if a.SearchEngine != nil {
+		_ = a.SearchEngine.Index(logID, indexableText)
+	}
 
-// RecordLog securely stores, indexes, and broadcasts a system event
-func (a *AuditController) RecordLog(level, service, message string) {
-	logID := generateLogID()
-	logData := LogPayload{Level: level, Service: service, Message: message}
-	payload, _ := json.Marshal(logData)
-
-	txnID := a.DB.BeginTxn()
-	_ = a.DB.WriteCompressed(AuditLogPageID, txnID, []byte(logID), payload, 720*time.Hour)
-	a.DB.CommitTxn(txnID)
-
-	indexableText := strings.ToLower(level + " " + service + " " + message)
-	_ = a.SearchEngine.Index(logID, indexableText)
-
+	// 2. Format for GUIKit UI
 	levelClass := "level-info"
-	if level == "ERROR" || level == "FATAL" {
+	if item.Level == "ERROR" || item.Level == "FATAL" {
 		levelClass = "level-error"
-	} else if level == "WARN" {
+	} else if item.Level == "WARN" {
 		levelClass = "level-warn"
+	} else if item.Level == "AUDIT" {
+		levelClass = "level-warn" // Gives audits a distinct visual pop in the UI
 	}
 
 	newLog := LogDisplay{
 		LevelClass: levelClass,
-		Level:      level,
-		Time:       time.Now().Format("15:04:05"),
-		Service:    service,
-		Message:    message,
+		Level:      item.Level,
+		Time:       time.Unix(0, item.Timestamp).Format("15:04:05"),
+		Service:    item.Service,
+		Message:    item.Message,
 	}
 
+	// 3. Update In-Memory Ring Buffer for quick page loads
 	a.logsMu.Lock()
 	a.recentLogs = append([]LogDisplay{newLog}, a.recentLogs...)
 	if len(a.recentLogs) > 100 {
@@ -88,9 +74,10 @@ func (a *AuditController) RecordLog(level, service, message string) {
 	}
 	a.logsMu.Unlock()
 
+	// 4. Broadcast via WebSockets for live-tail UI
 	if a.UI != nil {
 		a.UI.Broadcast("new_log", newLog)
 	}
 
-	log.Printf("[AUDIT] %s %s: %s", level, service, message)
+	return nil
 }
