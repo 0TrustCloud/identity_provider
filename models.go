@@ -4,7 +4,6 @@ import "time"
 
 // IdentityType uses string constants for explicit JSON serialization across the QUIC mesh
 type IdentityType string
-type RPCLogger = LogDispatcher
 const (
 	IdentityHuman   IdentityType = "human"
 	IdentityMachine IdentityType = "machine" // Aligns with TPM 2.0 / Service Key terminology
