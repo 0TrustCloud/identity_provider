@@ -4,7 +4,7 @@ go 1.25.10
 
 require (
 	github.com/gddisney/secure_network v1.1.1
-	github.com/gddisney/secure_policy v0.0.0-20260523022120-5ee49a38f840
+	github.com/gddisney/secure_policy v1.0.1-0.20260524212923-4c879b65768a
 	github.com/gddisney/ultimate_db v1.0.5
 )
 
@@ -12,6 +12,8 @@ require (
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/gddisney/guikit v1.0.5 // indirect
+	github.com/gddisney/logger v0.0.0-20260525222051-ccf9cfa5c34b // indirect
+	github.com/gddisney/orchid_sync v1.0.1 // indirect
 	github.com/gddisney/webauthnext v1.0.4-0.20260520202225-66034ca8acfa // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/webauthn v0.17.3 // indirect

@@ -3,10 +3,10 @@ package identity_provider
 import (
 	"bytes"
 	"encoding/json"
-	"log"
 	"net/http"
 	"time"
 
+	"github.com/gddisney/logger"
 	"github.com/gddisney/secure_network"
 	"github.com/gddisney/ultimate_db"
 )
@@ -25,18 +25,20 @@ type SCIMDaemon struct {
 	DB       *ultimate_db.DB
 	LocalBus chan secure_network.SystemEvent
 	Client   *http.Client
+	Logger   *logger.RPCLogger
 }
 
-func NewSCIMDaemon(db *ultimate_db.DB, bus chan secure_network.SystemEvent) *SCIMDaemon {
+func NewSCIMDaemon(db *ultimate_db.DB, bus chan secure_network.SystemEvent, sysLog *logger.RPCLogger) *SCIMDaemon {
 	return &SCIMDaemon{
 		DB:       db,
 		LocalBus: bus,
 		Client:   &http.Client{Timeout: 10 * time.Second},
+		Logger:   sysLog,
 	}
 }
 
 func (s *SCIMDaemon) Start() {
-	log.Println("[SCIM] Daemon online, listening for lifecycle events...")
+	if s.Logger != nil { s.Logger.Info("SCIM background daemon initialized and listening.") }
 	for event := range s.LocalBus {
 		if event.Topic == "scim_provision" {
 			go s.handleProvision(event.Payload)
@@ -50,7 +52,7 @@ func (s *SCIMDaemon) handleProvision(payload []byte) {
 		Identity Identity `json:"identity"`
 	}
 	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Printf("[SCIM] Malformed provision event: %v", err)
+		if s.Logger != nil { s.Logger.Error("Malformed SCIM provision event payload") }
 		return
 	}
 
@@ -66,10 +68,9 @@ func (s *SCIMDaemon) handleProvision(payload []byte) {
 	json.Unmarshal(appData, &app)
 
 	if app.SCIMEndpoint == "" {
-		return // Application uses SSO only, no SCIM configured
+		return // SSO only, no SCIM configured
 	}
 
-	// Map internal identity to standard SCIM 2.0 User Resource
 	scimUser := SCIMUser{
 		Schemas:  []string{"urn:ietf:params:scim:schemas:core:2.0:User"},
 		UserName: data.Identity.Attributes["email"],
@@ -85,10 +86,14 @@ func (s *SCIMDaemon) handleProvision(payload []byte) {
 
 	resp, err := s.Client.Do(req)
 	if err != nil {
-		log.Printf("[SCIM] Provisioning network failure for %s: %v", data.Identity.Subject, err)
+		if s.Logger != nil { 
+			s.Logger.Error("SCIM Network failure provisioning " + data.Identity.Subject + " to " + app.Name) 
+		}
 		return
 	}
 	defer resp.Body.Close()
 
-	log.Printf("[SCIM] Provisioned %s in %s. Remote Status: %d", data.Identity.Subject, app.Name, resp.StatusCode)
+	if s.Logger != nil {
+		s.Logger.Audit("system_scim_daemon", "REMOTE_PROVISION", "Provisioned "+data.Identity.Subject+" in "+app.Name)
+	}
 }
