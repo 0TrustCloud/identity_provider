@@ -15,14 +15,16 @@ type AdminController struct {
 	DB           *ultimate_db.DB
 	PolicyEngine *secure_policy.PolicyEngine
 	LocalBus     chan secure_network.SystemEvent
-	Logger       *logger.RPCLogger
+	Logger       *logger.LogDispatcher // Upgraded to the new Pub/Sub Dispatcher
 }
 
 // RegisterApp persists a new application tile to the registry
 func (a *AdminController) RegisterApp(app Application, actor string) error {
 	data, err := json.Marshal(app)
 	if err != nil {
-		if a.Logger != nil { a.Logger.Error("Failed to marshal application payload: " + err.Error()) }
+		if a.Logger != nil { 
+			a.Logger.Error("Failed to marshal application payload: " + err.Error()) 
+		}
 		return err
 	}
 	
@@ -41,7 +43,9 @@ func (a *AdminController) RegisterApp(app Application, actor string) error {
 func (a *AdminController) AssignUserToApp(identity Identity, appID string, actor string) error {
 	err := a.PolicyEngine.AddPolicy([]byte(identity.Subject), "access", appID, "ALLOW", nil)
 	if err != nil {
-		if a.Logger != nil { a.Logger.Error("Policy engine failed to assign user: " + err.Error()) }
+		if a.Logger != nil { 
+			a.Logger.Error("Policy engine failed to assign user: " + err.Error()) 
+		}
 		return err
 	}
 
