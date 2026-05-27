@@ -12,8 +12,8 @@ type contextKey string
 const SubjectContextKey contextKey = "subject_id"
 
 // EnforcePolicy intercepts incoming requests, validates the cryptographic session,
-// evaluates the Zero-Trust policy, and logs the access attempt.
-func EnforcePolicy(pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, sysLog *logger.RPCLogger, action, resource string) func(http.HandlerFunc) http.HandlerFunc {
+// evaluates the Zero-Trust policy, and logs the access attempt to the Pub/Sub dispatcher.
+func EnforcePolicy(pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, sysLog *logger.LogDispatcher, action, resource string) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie("session_id")
