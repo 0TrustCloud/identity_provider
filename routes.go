@@ -14,7 +14,7 @@ import (
 	"github.com/gddisney/secure_policy"
 	"gopkg.in/yaml.v3"
 )
-
+type RPCLogger = LogDispatcher
 // RouteConfig maps YAML entries to router endpoints
 type RouteConfig struct {
 	Pattern  string `yaml:"pattern"`
