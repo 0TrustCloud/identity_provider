@@ -40,31 +40,18 @@ var mountOnce sync.Once
 func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, Logger *logger.LogDispatcher, configPath string) {
 	mountOnce.Do(func() {
 		cfgData, err := os.ReadFile(configPath)
-		if err != nil {
-			if Logger != nil { Logger.Error("Failed to load routes.yaml: " + err.Error()) }
-			return
-		}
+		if err != nil { return }
 		var cfg Config
-		if err := yaml.Unmarshal(cfgData, &cfg); err != nil {
-			if Logger != nil { Logger.Error("Failed to parse routes.yaml: " + err.Error()) }
-			return
-		}
+		if err := yaml.Unmarshal(cfgData, &cfg); err != nil { return }
 
 		registry := map[string]http.HandlerFunc{
-
 			"ingest_handler": func(w http.ResponseWriter, req *http.Request) {
 				payload, _ := io.ReadAll(req.Body)
 				var logData IngestPayload
-				if err := json.Unmarshal(payload, &logData); err == nil {
-					if Logger != nil {
-						if logData.Level == "AUDIT" {
-							Logger.Audit(logData.Actor, "EXTERNAL_INGEST", logData.Message)
-						} else if logData.Level == "ERROR" {
-							Logger.Error(fmt.Sprintf("[%s] %s", logData.Service, logData.Message))
-						} else {
-							Logger.Info(fmt.Sprintf("[%s] %s", logData.Service, logData.Message))
-						}
-					}
+				if err := json.Unmarshal(payload, &logData); err == nil && Logger != nil {
+					if logData.Level == "AUDIT" { Logger.Audit(logData.Actor, "EXTERNAL_INGEST", logData.Message)
+					} else if logData.Level == "ERROR" { Logger.Error(fmt.Sprintf("[%s] %s", logData.Service, logData.Message))
+					} else { Logger.Info(fmt.Sprintf("[%s] %s", logData.Service, logData.Message)) }
 				}
 				w.WriteHeader(http.StatusOK)
 			},
@@ -80,149 +67,63 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				r.GUIKit.Render(c, "views/admin_logs")
 			},
 
-			"register_app_handler": func(w http.ResponseWriter, req *http.Request) {
-				actor, _ := req.Context().Value(SubjectContextKey).(string)
-				var newApp Application
-				if err := json.NewDecoder(req.Body).Decode(&newApp); err != nil {
-					http.Error(w, "Invalid payload format", http.StatusBadRequest)
-					return
-				}
-				if err := admin.RegisterApp(newApp, actor); err != nil {
-					http.Error(w, "Failed to register application", http.StatusInternalServerError)
-					return
-				}
-				w.WriteHeader(http.StatusCreated)
-			},
-
 			"wizard_register_app_handler": func(w http.ResponseWriter, req *http.Request) {
 				_ = req.ParseForm()
-				
-				actor, _ := req.Context().Value(SubjectContextKey).(string)
-				if actor == "" || strings.HasPrefix(actor, "eyJ") {
-					if cookie, err := req.Cookie("session_id"); err == nil {
-						cleanTkn := strings.TrimPrefix(cookie.Value, "user_session_")
-						if parsedSub, err := sm.ValidateCookieToken(cleanTkn); err == nil {
-							actor = parsedSub
-						}
-					}
-				}
+				actor := GetSubject(req.Context())
 				if actor == "" { actor = "admin" }
 
 				app := Application{
-					ID:             req.FormValue("app_id"),
-					Name:           req.FormValue("name"),
-					TargetURL:      req.FormValue("target_url"),
-					AuthProtocol:   req.FormValue("auth_protocol"),
-					RequiredPolicy: "enforce",
-					SCIMEndpoint:   req.FormValue("scim_endpoint"),
-					SCIMToken:      req.FormValue("scim_token"),
+					ID: req.FormValue("app_id"), Name: req.FormValue("name"), TargetURL: req.FormValue("target_url"),
+					AuthProtocol: req.FormValue("auth_protocol"), RequiredPolicy: "enforce", SCIMEndpoint: req.FormValue("scim_endpoint"), SCIMToken: req.FormValue("scim_token"),
 				}
-
-				if app.ID == "" || app.Name == "" {
-					http.Error(w, "Bad Request: Missing application parameter attributes", http.StatusBadRequest)
-					return
-				}
-
-				if err := admin.RegisterApp(app, actor); err != nil {
-					http.Error(w, "Database write failure: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
+				if app.ID != "" && app.Name != "" { _ = admin.RegisterApp(app, actor) }
 				http.Redirect(w, req, "/admin/identity", http.StatusFound)
 			},
 
 			"wizard_provision_user_handler": func(w http.ResponseWriter, req *http.Request) {
 				_ = req.ParseForm()
-				
-				actor, _ := req.Context().Value(SubjectContextKey).(string)
-				if actor == "" || strings.HasPrefix(actor, "eyJ") {
-					if cookie, err := req.Cookie("session_id"); err == nil {
-						cleanTkn := strings.TrimPrefix(cookie.Value, "user_session_")
-						if parsedSub, err := sm.ValidateCookieToken(cleanTkn); err == nil {
-							actor = parsedSub
-						}
-					}
-				}
+				actor := GetSubject(req.Context())
 				if actor == "" { actor = "admin" }
 
 				identity := Identity{
-					Subject:       req.FormValue("subject"),
-					Type:          IdentityHuman,
-					HardwareBound: true,
-					Attributes: map[string]string{
-						"email":       req.FormValue("email"),
-						"given_name":  req.FormValue("given_name"),
-						"family_name": req.FormValue("family_name"),
-					},
+					Subject: req.FormValue("subject"), Type: IdentityHuman, HardwareBound: true,
+					Attributes: map[string]string{ "email": req.FormValue("email"), "given_name": req.FormValue("given_name"), "family_name": req.FormValue("family_name") },
 				}
 
 				appID := req.FormValue("app_id")
-				if identity.Subject == "" || appID == "" {
-					http.Error(w, "Bad Request: Missing assignment criteria parameters", http.StatusBadRequest)
-					return
-				}
-
-				if err := admin.AssignUserToApp(identity, appID, actor); err != nil {
-					http.Error(w, "Provisioning orchestration failed: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
+				if identity.Subject != "" && appID != "" { _ = admin.AssignUserToApp(identity, appID, actor) }
 				http.Redirect(w, req, "/admin/scim/create", http.StatusFound)
 			},
 
 			"wizard_commit_policy_handler": func(w http.ResponseWriter, req *http.Request) {
 				_ = req.ParseForm()
-				
-				actor, _ := req.Context().Value(SubjectContextKey).(string)
-				if actor == "" || strings.HasPrefix(actor, "eyJ") {
-					if cookie, err := req.Cookie("session_id"); err == nil {
-						cleanTkn := strings.TrimPrefix(cookie.Value, "user_session_")
-						if parsedSub, err := sm.ValidateCookieToken(cleanTkn); err == nil {
-							actor = parsedSub
-						}
-					}
-				}
+				actor := GetSubject(req.Context())
 				if actor == "" { actor = "admin" }
 
 				targetSubject := req.FormValue("policy_subject")
 				actionScope := req.FormValue("policy_action")
 				resourceDomain := req.FormValue("policy_resource")
 
-				if targetSubject == "" || actionScope == "" || resourceDomain == "" {
-					http.Error(w, "Bad Request: Missing required policy definition options", http.StatusBadRequest)
-					return
-				}
-
-				// FIX: Correctly map the full ABAC bounds instead of a flat string
-				err := pe.AddPolicy([]byte(targetSubject), actionScope, resourceDomain, "ALLOW", nil)
-				if err != nil {
-					http.Error(w, "Policy engine update failure: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-
-				if Logger != nil {
-					Logger.Log("AUDIT", "POLICY_WIZARD", fmt.Sprintf("Operator '%s' granted action '%s' on resource '%s' to subject '%s'", actor, actionScope, resourceDomain, targetSubject))
+				if targetSubject != "" && actionScope != "" && resourceDomain != "" {
+					_ = pe.AddPolicy([]byte(targetSubject), actionScope, resourceDomain, "ALLOW", nil)
+					if Logger != nil { Logger.Log("AUDIT", "POLICY_WIZARD", fmt.Sprintf("Operator '%s' granted action '%s' on resource '%s' to subject '%s'", actor, actionScope, resourceDomain, targetSubject)) }
 				}
 				http.Redirect(w, req, "/admin/scim/create", http.StatusFound)
 			},
 
 			"logout_handler": func(w http.ResponseWriter, req *http.Request) {
 				cookie, err := req.Cookie("session_id")
-				if err == nil && cookie.Value != "" {
-					sm.RevokeTokenString(cookie.Value)
-					if Logger != nil { Logger.Info("Session revoked for token: " + cookie.Value[:10] + "...") }
-				}
-				http.SetCookie(w, &http.Cookie{
-					Name: "session_id", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
-				})
+				if err == nil && cookie.Value != "" { sm.RevokeTokenString(cookie.Value) }
+				http.SetCookie(w, &http.Cookie{Name: "session_id", Value: "", Path: "/", MaxAge: -1})
 				http.Redirect(w, req, "/", http.StatusSeeOther)
 			},
 		}
 
-		for _, route := range cfg.Routes {
+		for _, rCfg := range cfg.Routes {
+			// Pin the loop variable to prevent closure overwrites
+			route := rCfg 
 			handler, ok := registry[route.Handler]
-			if !ok {
-				if Logger != nil { Logger.Error("Handler not found in registry: " + route.Handler) }
-				continue
-			}
+			if !ok { continue }
 
 			var finalHandler http.HandlerFunc
 			if route.Action != "NONE" && route.Action != "" {
