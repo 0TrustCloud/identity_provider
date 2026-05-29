@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/gddisney/guikit"
@@ -15,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// RouteConfig maps YAML entries to router endpoints [cite: 1]
 type RouteConfig struct {
 	Pattern  string `yaml:"pattern"`
 	Method   string `yaml:"method"`
@@ -27,6 +29,7 @@ type Config struct {
 	Routes []RouteConfig `yaml:"routes"`
 }
 
+// IngestPayload defines the expected JSON structure for external logs [cite: 1]
 type IngestPayload struct {
 	Actor   string `json:"actor"`
 	Level   string `json:"level"`
@@ -36,8 +39,10 @@ type IngestPayload struct {
 
 var mountOnce sync.Once
 
+// RegisterRoutes binds identity, admin, and audit endpoints dynamically. [cite: 1]
 func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *AuditController, pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, Logger *logger.LogDispatcher, configPath string) {
 	mountOnce.Do(func() {
+		// 1. Load Dynamic Config [cite: 1]
 		cfgData, err := os.ReadFile(configPath)
 		if err != nil {
 			if Logger != nil {
@@ -53,7 +58,10 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 			return
 		}
 
+		// 2. Define Handler Registry [cite: 1]
 		registry := map[string]http.HandlerFunc{
+
+			// HTTP Log Ingest: Routes external logs through the central Pub/Sub dispatcher [cite: 1]
 			"ingest_handler": func(w http.ResponseWriter, req *http.Request) {
 				payload, _ := io.ReadAll(req.Body)
 				var logData IngestPayload
@@ -71,6 +79,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				w.WriteHeader(http.StatusOK)
 			},
 
+			// Admin Logs UI: Serves the real-time ring buffer from the AuditController [cite: 1]
 			"admin_logs_handler": func(w http.ResponseWriter, req *http.Request) {
 				c := &guikit.Context{W: w, R: req, Data: make(map[string]interface{})}
 				audit.logsMu.RLock()
@@ -82,6 +91,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				r.GUIKit.Render(c, "views/admin_logs")
 			},
 
+			// App Registration: Deploys a new SCIM integration via raw JSON endpoint [cite: 1]
 			"register_app_handler": func(w http.ResponseWriter, req *http.Request) {
 				actor, _ := req.Context().Value(SubjectContextKey).(string)
 				var newApp Application
@@ -96,12 +106,22 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				w.WriteHeader(http.StatusCreated)
 			},
 
-			// WIZARD API: Outbound Application Registration Form Destination
+			// WIZARD API: Form handler destination for Application Registration [cite: 2]
 			"wizard_register_app_handler": func(w http.ResponseWriter, req *http.Request) {
 				_ = req.ParseForm()
+				
+				// FIX: Safely parse token prefix errors out of context keys [cite: 2]
 				actor, _ := req.Context().Value(SubjectContextKey).(string)
+				if actor == "" || strings.HasPrefix(actor, "eyJ") {
+					if cookie, err := req.Cookie("session_id"); err == nil {
+						cleanTkn := strings.TrimPrefix(cookie.Value, "user_session_")
+						if parsedSub, err := sm.ValidateCookieToken(cleanTkn); err == nil {
+							actor = parsedSub
+						}
+					}
+				}
 				if actor == "" {
-					actor = "system_bootstrap"
+					actor = "admin"
 				}
 
 				app := Application{
@@ -115,24 +135,34 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				}
 
 				if app.ID == "" || app.Name == "" {
-					http.Error(w, "Bad Request: Missing unique application tracking data", http.StatusBadRequest)
+					http.Error(w, "Bad Request: Missing application parameter attributes", http.StatusBadRequest)
 					return
 				}
 
 				if err := admin.RegisterApp(app, actor); err != nil {
-					http.Error(w, "Database persistence failure: "+err.Error(), http.StatusInternalServerError)
+					http.Error(w, "Database write failure: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
 
 				http.Redirect(w, req, "/admin/identity", http.StatusFound)
 			},
 
-			// WIZARD API: Core Account & SCIM Provisioning Submission Endpoint
+			// WIZARD API: Core Account & SCIM Provisioning Form Handler [cite: 2]
 			"wizard_provision_user_handler": func(w http.ResponseWriter, req *http.Request) {
 				_ = req.ParseForm()
+				
+				// FIX: Clean subject tracking extraction pass [cite: 2]
 				actor, _ := req.Context().Value(SubjectContextKey).(string)
+				if actor == "" || strings.HasPrefix(actor, "eyJ") {
+					if cookie, err := req.Cookie("session_id"); err == nil {
+						cleanTkn := strings.TrimPrefix(cookie.Value, "user_session_")
+						if parsedSub, err := sm.ValidateCookieToken(cleanTkn); err == nil {
+							actor = parsedSub
+						}
+					}
+				}
 				if actor == "" {
-					actor = "system_bootstrap"
+					actor = "admin"
 				}
 
 				identity := Identity{
@@ -148,7 +178,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 
 				appID := req.FormValue("app_id")
 				if identity.Subject == "" || appID == "" {
-					http.Error(w, "Bad Request: Missing user assignment attributes", http.StatusBadRequest)
+					http.Error(w, "Bad Request: Missing assignment criteria parameters", http.StatusBadRequest)
 					return
 				}
 
@@ -160,12 +190,21 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				http.Redirect(w, req, "/admin/scim/create", http.StatusFound)
 			},
 
-			// WIZARD API: PBAC Core Engine Rule Commits
+			// WIZARD API: Form Handler endpoint for the Policy Generator [cite: 2]
 			"wizard_commit_policy_handler": func(w http.ResponseWriter, req *http.Request) {
 				_ = req.ParseForm()
+				
 				actor, _ := req.Context().Value(SubjectContextKey).(string)
+				if actor == "" || strings.HasPrefix(actor, "eyJ") {
+					if cookie, err := req.Cookie("session_id"); err == nil {
+						cleanTkn := strings.TrimPrefix(cookie.Value, "user_session_")
+						if parsedSub, err := sm.ValidateCookieToken(cleanTkn); err == nil {
+							actor = parsedSub
+						}
+					}
+				}
 				if actor == "" {
-					actor = "system_bootstrap"
+					actor = "admin"
 				}
 
 				targetSubject := req.FormValue("policy_subject")
@@ -173,23 +212,24 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				resourceDomain := req.FormValue("policy_resource")
 
 				if targetSubject == "" || actionScope == "" || resourceDomain == "" {
-					http.Error(w, "Bad Request: All policy rule values are required", http.StatusBadRequest)
+					http.Error(w, "Bad Request: Missing required policy definition options", http.StatusBadRequest)
 					return
 				}
 
 				err := pe.GrantPermission([]byte(targetSubject), actionScope)
 				if err != nil {
-					http.Error(w, "Policy database engine update error: "+err.Error(), http.StatusInternalServerError)
+					http.Error(w, "Policy engine update failure: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
 
 				if Logger != nil {
-					Logger.Log("AUDIT", "POLICY_GENERATOR", fmt.Sprintf("Operator '%s' granted action '%s' on resource '%s' to subject '%s'", actor, actionScope, resourceDomain, targetSubject))
+					Logger.Log("AUDIT", "POLICY_WIZARD", fmt.Sprintf("Operator '%s' granted action '%s' on resource '%s' to subject '%s'", actor, actionScope, resourceDomain, targetSubject))
 				}
 
 				http.Redirect(w, req, "/admin/scim/create", http.StatusFound)
 			},
 
+			// Logout: Revokes the hardware-bound session token [cite: 1]
 			"logout_handler": func(w http.ResponseWriter, req *http.Request) {
 				cookie, err := req.Cookie("session_id")
 				if err == nil && cookie.Value != "" {
@@ -211,6 +251,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 			},
 		}
 
+		// 3. Register HTTP routes dynamically [cite: 1]
 		for _, route := range cfg.Routes {
 			handler, ok := registry[route.Handler]
 			if !ok {
@@ -220,6 +261,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 				continue
 			}
 
+			// Apply EnforcePolicy middleware only if action/resource are defined in YAML [cite: 1]
 			var finalHandler http.HandlerFunc
 			if route.Action != "NONE" && route.Action != "" {
 				finalHandler = EnforcePolicy(pe, sm, Logger, route.Action, route.Resource)(func(w http.ResponseWriter, req *http.Request) {
