@@ -5,15 +5,20 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/gddisney/logger"
-	"github.com/gddisney/secure_policy"
+	"github.com/0TrustCloud/secure_data_format"
+	"github.com/0TrustCloud/logger"
+	"github.com/0TrustCloud/secure_policy"
 )
 
 type contextKey string
 
-// Unexported key prevents cross-package collision and type dropping
-const subjectContextKey contextKey = "subject_id"
+// Unexported keys prevent cross-package collision and type dropping
+const (
+	subjectContextKey  contextKey = "subject_id"
+	sdfTokenContextKey contextKey = "sdf_grant_token"
+)
 
 // WithSubject safely injects the identity string into the context
 func WithSubject(ctx context.Context, subject string) context.Context {
@@ -28,9 +33,23 @@ func GetSubject(ctx context.Context) string {
 	return ""
 }
 
+// WithSDFGrant safely injects the compiled SDF token into the context
+func WithSDFGrant(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, sdfTokenContextKey, token)
+}
+
+// GetSDFGrant safely extracts the compiled SDF token from the context
+func GetSDFGrant(ctx context.Context) string {
+	if token, ok := ctx.Value(sdfTokenContextKey).(string); ok {
+		return token
+	}
+	return ""
+}
+
 // EnforcePolicy intercepts incoming requests, validates the cryptographic session,
-// evaluates the Zero-Trust policy, and logs the access attempt to the Pub/Sub dispatcher.
-func EnforcePolicy(pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, sysLog *logger.LogDispatcher, action, resource string) func(http.HandlerFunc) http.HandlerFunc {
+// evaluates the Zero-Trust policy, synthesizes a programmatic access grant via SDF,
+// and logs the resulting state transition to the dispatcher.
+func EnforcePolicy(pe *secure_policy.PolicyEngine, sm *secure_policy.SessionManager, sdf *secure_data_format.SecureDataEngine, sysLog *logger.LogDispatcher, action, resource string) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie("session_id")
@@ -71,12 +90,42 @@ func EnforcePolicy(pe *secure_policy.PolicyEngine, sm *secure_policy.SessionMana
 			// 3. THE SILVER BULLET: GOD MODE
 			// --------------------------------------------------
 			// Bypasses the PolicyEngine completely for the root admin.
-			// This prevents lockout loops if the database holds a stale revocation tombstone.
+			// Compiles a critical Proof-Of-Possession bypass token to avoid state logouts.
 			if cleanSubject == "admin" {
 				if sysLog != nil {
 					sysLog.Info(fmt.Sprintf("ZTP God-Mode: Automatic access granted to admin for %s", r.URL.Path))
 				}
+
 				ctx := WithSubject(r.Context(), cleanSubject)
+
+				if sdf != nil {
+					script := fmt.Sprintf(`
+						grant:god_mode.bypass#admin(
+							action("%s")
+							resource("%s")
+							path("%s")
+						)
+					`, action, resource, r.URL.Path)
+
+					tx := secure_data_format.DataInvocation{
+						TargetAddress: fmt.Sprintf("mesh:bypass:godmode:%s", resource),
+						Caller:        "admin",
+						Nonce:         uint64(time.Now().UnixNano()),
+						Method:        "ASSERT", // Semantic verification match
+						Profile:       secure_data_format.ProfileProofOfPoss, // Ephemeral validity ceiling
+						Args: map[string]interface{}{
+							"action":   action,
+							"resource": resource,
+							"path":     r.URL.Path,
+						},
+					}
+
+					if token, err := sdf.CompileSecureData(script, tx); err == nil {
+						r.Header.Set("X-Mesh-SDF-Token", token)
+						ctx = WithSDFGrant(ctx, token)
+					}
+				}
+
 				next(w, r.WithContext(ctx))
 				return
 			}
@@ -90,11 +139,53 @@ func EnforcePolicy(pe *secure_policy.PolicyEngine, sm *secure_policy.SessionMana
 				return
 			}
 
+			// --------------------------------------------------
+			// 5. SDF POLYMORPHIC TRANSITION TOKEN SYNTHESIS
+			// --------------------------------------------------
+			// Compiles an isolated short-lived grant mapping directly to your parser schema.
+			var sdfToken string
+			if sdf != nil {
+				script := fmt.Sprintf(`
+					grant:mesh.authorize#%s(
+						action("%s")
+						resource("%s")
+						verified_edge("true")
+					)
+				`, cleanSubject, action, resource)
+
+				tx := secure_data_format.DataInvocation{
+					TargetAddress: fmt.Sprintf("mesh:auth:grant:%s", resource),
+					Caller:        cleanSubject,
+					Nonce:         uint64(time.Now().UnixNano()),
+					Method:        "DELEGATE",
+					Profile:       secure_data_format.ProfileGrant, // Standard structural grant window
+					Args: map[string]interface{}{
+						"action":   action,
+						"resource": resource,
+						"path":     r.URL.Path,
+					},
+				}
+
+				var compileErr error
+				sdfToken, compileErr = sdf.CompileSecureData(script, tx)
+				if compileErr != nil {
+					if sysLog != nil {
+						sysLog.Error("SDF cryptographic token synthesis failure inside middleware transit: " + compileErr.Error())
+					}
+					http.Error(w, "Internal Security Serialization Error", http.StatusInternalServerError)
+					return
+				}
+				r.Header.Set("X-Mesh-SDF-Token", sdfToken)
+			}
+
 			if sysLog != nil {
 				sysLog.Info("Access granted to " + cleanSubject + " for " + r.URL.Path)
 			}
 
 			ctx := WithSubject(r.Context(), cleanSubject)
+			if sdfToken != "" {
+				ctx = WithSDFGrant(ctx, sdfToken)
+			}
 			next(w, r.WithContext(ctx))
 		}
 	}

@@ -2,52 +2,140 @@ package identity_provider
 
 import (
 	"encoding/json"
+	"fmt"
+	"time"
 
-	"github.com/gddisney/logger"
-	"github.com/gddisney/secure_network"
-	"github.com/gddisney/secure_policy"
-	"github.com/gddisney/ultimate_db"
+	"github.com/0TrustCloud/logger"
+	"github.com/0TrustCloud/secure_data_format"
+	"github.com/0TrustCloud/secure_network"
+	"github.com/0TrustCloud/secure_policy"
+	"github.com/0TrustCloud/ultimate_db"
 )
 
-const AppRegistryPageID = ultimate_db.PageID(4)
 type AdminController struct {
 	DB           *ultimate_db.DB
 	PolicyEngine *secure_policy.PolicyEngine
 	LocalBus     chan secure_network.SystemEvent
-	Logger       *logger.LogDispatcher // Upgraded to the new Pub/Sub Dispatcher
+	Logger       *logger.LogDispatcher
+	SDFEngine    *secure_data_format.SecureDataEngine // Unified SDF compilation engine
 }
 
-// RegisterApp persists a new application tile to the registry
+// NewAdminController instantiates the controller with fully integrated SDF capability
+func NewAdminController(db *ultimate_db.DB, pe *secure_policy.PolicyEngine, bus chan secure_network.SystemEvent, log *logger.LogDispatcher, sdf *secure_data_format.SecureDataEngine) *AdminController {
+	return &AdminController{
+		DB:           db,
+		PolicyEngine: pe,
+		LocalBus:     bus,
+		Logger:       log,
+		SDFEngine:    sdf,
+	}
+}
+
+// RegisterApp compiles a structural application registration schema via SDF
+// and appends an immutable record to the ledger state.
 func (a *AdminController) RegisterApp(app Application, actor string) error {
-	data, err := json.Marshal(app)
+	// 1. Generate declarative configuration script for the SDF parser
+	script := fmt.Sprintf(`
+		service:catalog.register#%s(
+			name("%s")
+			target_url("%s")
+			auth_protocol("%s")
+			required_policy("%s")
+		)
+	`, app.ID, app.Name, app.TargetURL, app.AuthProtocol, app.RequiredPolicy)
+
+	// 2. Marshal baseline app data for token argument inclusion
+	appBytes, err := json.Marshal(app)
 	if err != nil {
-		if a.Logger != nil { 
-			a.Logger.Error("Failed to marshal application payload: " + err.Error()) 
+		if a.Logger != nil {
+			a.Logger.Error("Failed to serialize application configuration payload: " + err.Error())
 		}
 		return err
 	}
-	
-	txn := a.DB.BeginTxn()
-	err = a.DB.Write(AppRegistryPageID, txn, []byte(app.ID), data, 0)
-	a.DB.CommitTxn(txn)
 
-	if err == nil && a.Logger != nil {
-		a.Logger.Audit(actor, "DEPLOY_SERVICE", "Successfully registered new application: "+app.ID)
+	var args map[string]interface{}
+	if err := json.Unmarshal(appBytes, &args); err != nil {
+		return err
+	}
+	args["registered_by"] = actor
+
+	tx := secure_data_format.DataInvocation{
+		TargetAddress: fmt.Sprintf("mesh:catalog:app:%s", app.ID),
+		Caller:        actor,
+		Nonce:         uint64(app.ID[0]), // Establish a predictable positional nonce from ID base
+		Method:        "EMIT",
+		Profile:       secure_data_format.ProfileStructuredLog, // Use 10-year archival lifecycle profile
+		Args:          args,
 	}
 
-	return err
+	// 3. Compile structural graph token and execute 2PL transactional storage commit
+	token, err := a.SDFEngine.CompileSecureData(script, tx)
+	if err != nil {
+		if a.Logger != nil {
+			a.Logger.Error(fmt.Sprintf("Application catalog registration failed via SDF: %v", err))
+		}
+		return err
+	}
+
+	if a.Logger != nil {
+		a.Logger.Audit(actor, "DEPLOY_SERVICE", fmt.Sprintf("Successfully registered application tile %s using contract token signature hash: %s", app.ID, token[len(token)-15:]))
+	}
+
+	return nil
 }
 
-// AssignUserToApp grants access and triggers the SCIM provisioning flow
+// AssignUserToApp evaluates the entitlement rule through the SDF script token synthesis layer,
+// updates the active policy engine, and safely triggers the outbound async SCIM daemon provisioning pipeline.
 func (a *AdminController) AssignUserToApp(identity Identity, appID string, actor string) error {
-	err := a.PolicyEngine.AddPolicy([]byte(identity.Subject), "access", appID, "ALLOW", nil)
+	// 1. Enforce rule expression via precise grammatical constraints matching the engine parser
+	script := fmt.Sprintf(`
+		grant:mesh.access#%s(
+			scope("access")
+			subject("%s")
+			identity_type("%s")
+			hardware_bound:enforced("%t")
+		)
+	`, appID, identity.Subject, string(identity.Type), identity.HardwareBound)
+
+	// 2. Map standard identity contextual dimensions into execution namespace arguments
+	args := map[string]interface{}{
+		"subject":        identity.Subject,
+		"identity_type":  string(identity.Type),
+		"hardware_bound": identity.HardwareBound,
+		"session_id":     identity.SessionID,
+	}
+	for k, v := range identity.Attributes {
+		args["attr_"+k] = v
+	}
+
+	tx := secure_data_format.DataInvocation{
+		TargetAddress: fmt.Sprintf("mesh:policy:grant:%s", appID),
+		Caller:        actor,
+		Nonce:         uint64(time.Now().UnixNano()),
+		Method:        "DELEGATE",
+		Profile:       secure_data_format.ProfileGrant, // Enforces explicit short-term credential window bounds
+		Args:          args,
+	}
+
+	// 3. Compile cryptographic polymorphic token
+	_, err := a.SDFEngine.CompileSecureData(script, tx)
 	if err != nil {
-		if a.Logger != nil { 
-			a.Logger.Error("Policy engine failed to assign user: " + err.Error()) 
+		if a.Logger != nil {
+			a.Logger.Error(fmt.Sprintf("Access assignment token compilation aborted by SDF engine: %v", err))
 		}
 		return err
 	}
 
+	// 4. Update the structural policy matrix state machine
+	err = a.PolicyEngine.AddPolicy([]byte(identity.Subject), "access", appID, "ALLOW", nil)
+	if err != nil {
+		if a.Logger != nil {
+			a.Logger.Error("Policy matrix failure applying newly validated assignment: " + err.Error())
+		}
+		return err
+	}
+
+	// 5. Package state envelope cleanly and dispatch across the background system event bus
 	eventPayload, _ := json.Marshal(map[string]interface{}{
 		"app_id":   appID,
 		"identity": identity,
@@ -59,8 +147,26 @@ func (a *AdminController) AssignUserToApp(identity Identity, appID string, actor
 	}
 
 	if a.Logger != nil {
-		a.Logger.Audit(actor, "GRANT_ACCESS", "Assigned user "+identity.Subject+" to integration "+appID)
+		a.Logger.Audit(actor, "GRANT_ACCESS", fmt.Sprintf("Assigned zero-trust identity token assertion for subject %s to target endpoint application %s", identity.Subject, appID))
 	}
 
 	return nil
+}
+
+// SynthesizeIdentityToken acts as a bridge for HTTP handlers to dynamically compile ad-hoc SDF tokens
+func (a *AdminController) SynthesizeIdentityToken(script, targetAddress, actor string, nonce uint64, profile secure_data_format.TokenProfile, args map[string]interface{}) (string, error) {
+	if a.SDFEngine == nil {
+		return "", fmt.Errorf("SDF engine is not initialized on this controller")
+	}
+
+	tx := secure_data_format.DataInvocation{
+		TargetAddress: targetAddress,
+		Caller:        actor,
+		Nonce:         nonce,
+		Method:        "ASSERT",
+		Profile:       profile,
+		Args:          args,
+	}
+
+	return a.SDFEngine.CompileSecureData(script, tx)
 }
