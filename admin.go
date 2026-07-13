@@ -3,6 +3,7 @@ package identity_provider
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/0TrustCloud/logger"
@@ -62,7 +63,7 @@ func (a *AdminController) RegisterApp(app Application, actor string) error {
 	tx := secure_data_format.DataInvocation{
 		TargetAddress: fmt.Sprintf("mesh:catalog:app:%s", app.ID),
 		Caller:        actor,
-		Nonce:         uint64(app.ID[0]), // Establish a predictable positional nonce from ID base
+		Nonce:         nonceFromAppID(app.ID),
 		Method:        "EMIT",
 		Profile:       secure_data_format.ProfileStructuredLog, // Use 10-year archival lifecycle profile
 		Args:          args,
@@ -77,10 +78,77 @@ func (a *AdminController) RegisterApp(app Application, actor string) error {
 		return err
 	}
 
+	if err := a.saveApp(app); err != nil {
+		return err
+	}
+
 	if a.Logger != nil {
 		a.Logger.Audit(actor, "DEPLOY_SERVICE", fmt.Sprintf("Successfully registered application tile %s using contract token signature hash: %s", app.ID, token[len(token)-15:]))
 	}
 
+	return nil
+}
+
+func (a *AdminController) saveApp(app Application) error {
+	if a.DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+	appBytes, err := json.Marshal(app)
+	if err != nil {
+		return err
+	}
+	txn := a.DB.BeginTxn()
+	if err := a.DB.Write(AppRegistryPageID, txn, []byte(app.ID), appBytes, 0); err != nil {
+		return err
+	}
+	a.DB.CommitTxn(txn)
+	return nil
+}
+
+func (a *AdminController) GetApp(appID string) (Application, error) {
+	if a.DB == nil {
+		return Application{}, fmt.Errorf("database not initialized")
+	}
+	txn := a.DB.BeginTxn()
+	raw, err := a.DB.Read(AppRegistryPageID, txn, []byte(appID))
+	a.DB.CommitTxn(txn)
+	if err != nil || len(raw) == 0 {
+		return Application{}, fmt.Errorf("application not found")
+	}
+	var app Application
+	return app, json.Unmarshal(raw, &app)
+}
+
+func (a *AdminController) UpdateAppSCIM(appID, endpoint, token, actor string) error {
+	app, err := a.GetApp(appID)
+	if err != nil {
+		return err
+	}
+	app.SCIMEndpoint = endpoint
+	if token != "" {
+		app.SCIMToken = token
+	}
+	if err := a.saveApp(app); err != nil {
+		return err
+	}
+	if a.Logger != nil {
+		a.Logger.Audit(actor, "SCIM_CONFIGURE", fmt.Sprintf("Updated SCIM endpoint for app %s", appID))
+	}
+	return nil
+}
+
+func (a *AdminController) EmitSCIMProvision(appID string, identity Identity) error {
+	if a.LocalBus == nil {
+		return fmt.Errorf("event bus not initialized")
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"app_id":   appID,
+		"identity": identity,
+	})
+	if err != nil {
+		return err
+	}
+	a.LocalBus <- secure_network.SystemEvent{Topic: "scim_provision", Payload: payload}
 	return nil
 }
 
@@ -127,7 +195,11 @@ func (a *AdminController) AssignUserToApp(identity Identity, appID string, actor
 	}
 
 	// 4. Update the structural policy matrix state machine
-	err = a.PolicyEngine.AddPolicy([]byte(identity.Subject), "access", appID, "ALLOW", nil)
+	resource := appID
+	if !strings.HasPrefix(resource, "app:") {
+		resource = "app:" + appID
+	}
+	err = a.PolicyEngine.AddPolicy([]byte(identity.Subject), "access", resource, "ALLOW", nil)
 	if err != nil {
 		if a.Logger != nil {
 			a.Logger.Error("Policy matrix failure applying newly validated assignment: " + err.Error())
@@ -169,4 +241,33 @@ func (a *AdminController) SynthesizeIdentityToken(script, targetAddress, actor s
 	}
 
 	return a.SDFEngine.CompileSecureData(script, tx)
+}
+
+// ListApps returns IAM catalog applications registered via RegisterApp.
+func (a *AdminController) ListApps() ([]Application, error) {
+	if a.DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	var apps []Application
+	txn := a.DB.BeginTxn()
+	defer a.DB.CommitTxn(txn)
+	_ = a.DB.Scan(AppRegistryPageID, txn, nil, func(key, value []byte) bool {
+		if len(value) == 0 {
+			return true
+		}
+		var app Application
+		if json.Unmarshal(value, &app) == nil && app.ID != "" {
+			app.SCIMToken = ""
+			apps = append(apps, app)
+		}
+		return true
+	})
+	return apps, nil
+}
+
+func nonceFromAppID(id string) uint64 {
+	if id == "" {
+		return uint64(time.Now().UnixNano())
+	}
+	return uint64(id[0])
 }

@@ -1,20 +1,21 @@
 module github.com/0TrustCloud/identity_provider
 
-go 1.25.0
+go 1.25.10
 
 require (
-	github.com/0TrustCloud/guikit v1.1.3-0.20260530040829-bb3a7bb56546
-	github.com/0TrustCloud/logger v1.0.3-0.20260531010651-0732aad9e52f
-	github.com/0TrustCloud/orchid_sync v1.0.4
-	github.com/0TrustCloud/secure_data_format v1.0.0
-	github.com/0TrustCloud/secure_network v1.1.4
-	github.com/0TrustCloud/secure_policy v1.0.6-0.20260531002558-a3c918113eef
-	github.com/0TrustCloud/ultimate_db v1.2.2
+	github.com/0TrustCloud/guikit v1.2.3
+	github.com/0TrustCloud/logger v1.0.3
+	github.com/0TrustCloud/orchid_sync v1.0.5
+	github.com/0TrustCloud/secure_data_format v1.0.1
+	github.com/0TrustCloud/secure_network v1.1.6
+	github.com/0TrustCloud/secure_policy v1.0.6
+	github.com/0TrustCloud/ultimate_db v1.3.6
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/0TrustCloud/auth_provider v1.0.1 // indirect
+	github.com/0TrustCloud/auth_provider v1.0.5 // indirect
+	github.com/0TrustCloud/samln v1.0.5 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
@@ -31,9 +32,9 @@ require (
 	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/net v0.54.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/square/go-jose.v2 v2.6.0 // indirect
 )

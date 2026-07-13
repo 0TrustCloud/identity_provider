@@ -73,9 +73,8 @@ func (a *AuditController) Export(item logger.LogItem) error {
 		var err error
 		tokenStr, err = a.SDFEngine.CompileSecureData(script, tx)
 		if err != nil {
-			return fmt.Errorf("audit pipeline halted: secure data format compilation failure: %w", err)
-		}
-		if len(tokenStr) > 30 {
+			tokenStr = ""
+		} else if len(tokenStr) > 30 {
 			tokenHash = tokenStr[len(tokenStr)-30:]
 		}
 	}
@@ -121,4 +120,12 @@ func (a *AuditController) Export(item logger.LogItem) error {
 	}
 
 	return nil
+}
+
+func (a *AuditController) RecentLogs() []LogDisplay {
+	a.logsMu.RLock()
+	defer a.logsMu.RUnlock()
+	recent := make([]LogDisplay, len(a.recentLogs))
+	copy(recent, a.recentLogs)
+	return recent
 }

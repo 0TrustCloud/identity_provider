@@ -99,7 +99,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 					// Leverages the updated SDF-backed catalog builder internally
 					_ = admin.RegisterApp(app, actor)
 				}
-				http.Redirect(w, req, "/admin/identity", http.StatusFound)
+				http.Redirect(w, req, "/iam", http.StatusFound)
 			},
 
 			"wizard_provision_user_handler": func(w http.ResponseWriter, req *http.Request) {
@@ -125,7 +125,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 					// Compiles the structural ProfileGrant authorization contract token
 					_ = admin.AssignUserToApp(identity, appID, actor)
 				}
-				http.Redirect(w, req, "/admin/scim/create", http.StatusFound)
+				http.Redirect(w, req, "/iam", http.StatusFound)
 			},
 
 			"wizard_compile_sdf_token_handler": func(w http.ResponseWriter, req *http.Request) {
@@ -187,7 +187,7 @@ func RegisterRoutes(r *secure_network.Router, admin *AdminController, audit *Aud
 						Logger.Audit(actor, "POLICY_WIZARD", fmt.Sprintf("Operator '%s' granted action '%s' on resource '%s' to subject '%s'", actor, actionScope, resourceDomain, targetSubject))
 					}
 				}
-				http.Redirect(w, req, "/admin/scim/create", http.StatusFound)
+				http.Redirect(w, req, "/iam", http.StatusFound)
 			},
 
 			"logout_handler": func(w http.ResponseWriter, req *http.Request) {
